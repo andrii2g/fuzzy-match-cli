@@ -1,20 +1,11 @@
 #!/usr/bin/env python3
 """
-fuzzy.py — Levenshtein / Jaro-Winkler fuzzy string matcher
+fuzzy.py — Levenshtein / Jaro / Jaro-Winkler fuzzy string matcher.
 
 Usage:
     fuzzy.py <query> [options] [wordlist_file]
 
-    If no file is given, reads the word list from stdin (one word per line).
-
-Options:
-    -n, --top N          Show top N matches (default: 10)
-    -t, --threshold N    Only show matches with score >= N (0–100, default: 0)
-    -a, --algo ALGO      Algorithm: levenshtein | jaro | jaro_winkler (default: levenshtein)
-    -c, --col N          Use column N (1-based) if input is CSV/TSV (default: 1)
-    -i, --ignore-case    Case-insensitive matching
-    --csv                Output results as CSV
-    -h, --help           Show this help
+If no file is given, reads the word list from stdin, one word per line.
 
 Examples:
     fuzzy.py "helo wrold" words.txt
@@ -23,271 +14,417 @@ Examples:
     fuzzy.py "nginx" /etc/hosts -i
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import io
 import sys
+from collections.abc import Callable, Sequence
 
 # ── ANSI colours ──────────────────────────────────────────────────────────────
-RESET  = "\x1b[0m"
-BOLD   = "\x1b[1m"
-DIM    = "\x1b[2m"
-GREEN  = "\x1b[32m"
+RESET = "\x1b[0m"
+BOLD = "\x1b[1m"
+DIM = "\x1b[2m"
+GREEN = "\x1b[32m"
 YELLOW = "\x1b[33m"
-CYAN   = "\x1b[36m"
-RED    = "\x1b[31m"
-BLUE   = "\x1b[34m"
+CYAN = "\x1b[36m"
+RED = "\x1b[31m"
 
-# ── Algorithms (zero dependencies) ────────────────────────────────────────────
+NO_COLOR = {
+    "reset": "",
+    "bold": "",
+    "dim": "",
+    "green": "",
+    "yellow": "",
+    "cyan": "",
+    "red": "",
+}
+
+ANSI_COLOR = {
+    "reset": RESET,
+    "bold": BOLD,
+    "dim": DIM,
+    "green": GREEN,
+    "yellow": YELLOW,
+    "cyan": CYAN,
+    "red": RED,
+}
+
+
+def palette(enabled: bool) -> dict[str, str]:
+    return ANSI_COLOR if enabled else NO_COLOR
+
+
+def supports_pretty_glyphs(stream: object) -> bool:
+    """Return whether a text stream can encode the CLI's pretty glyphs."""
+    encoding = getattr(stream, "encoding", None)
+    if not encoding:
+        return False
+
+    try:
+        "─█░".encode(encoding)
+    except (LookupError, UnicodeEncodeError):
+        return False
+
+    return True
+
+
+# ── Algorithms, zero runtime dependencies ────────────────────────────────────
 
 def levenshtein(a: str, b: str) -> int:
-    """Classic Wagner-Fischer DP algorithm. O(m·n) time, O(min(m,n)) space."""
+    """Return Levenshtein edit distance using O(m·n) time and O(min(m,n)) space."""
     if a == b:
         return 0
     if not a:
         return len(b)
     if not b:
         return len(a)
-    # Keep only two rows
+
+    # Keep the shorter string on the DP row axis to reduce memory usage.
     if len(a) < len(b):
         a, b = b, a
-    prev = list(range(len(b) + 1))
-    for i, ca in enumerate(a, 1):
-        curr = [i] + [0] * len(b)
-        for j, cb in enumerate(b, 1):
-            cost = 0 if ca == cb else 1
-            curr[j] = min(
-                prev[j] + 1,       # deletion
-                curr[j - 1] + 1,   # insertion
-                prev[j - 1] + cost # substitution
+
+    previous = list(range(len(b) + 1))
+    for i, char_a in enumerate(a, 1):
+        current = [i] + [0] * len(b)
+        for j, char_b in enumerate(b, 1):
+            substitution_cost = 0 if char_a == char_b else 1
+            current[j] = min(
+                previous[j] + 1,                  # deletion
+                current[j - 1] + 1,               # insertion
+                previous[j - 1] + substitution_cost,  # substitution
             )
-        prev = curr
-    return prev[-1]
+        previous = current
+
+    return previous[-1]
 
 
 def levenshtein_score(a: str, b: str) -> float:
-    """Normalise edit distance to a 0–100 similarity score."""
-    dist = levenshtein(a, b)
+    """Return Levenshtein similarity as a 0-100 score."""
     max_len = max(len(a), len(b))
     if max_len == 0:
         return 100.0
-    return round((1 - dist / max_len) * 100, 1)
+
+    distance = levenshtein(a, b)
+    return round((1 - distance / max_len) * 100, 1)
 
 
 def jaro(a: str, b: str) -> float:
-    """Jaro similarity. Returns 0–1."""
+    """Return Jaro similarity as a 0-1 score."""
     if a == b:
         return 1.0
-    la, lb = len(a), len(b)
-    if la == 0 or lb == 0:
+
+    len_a, len_b = len(a), len(b)
+    if len_a == 0 or len_b == 0:
         return 0.0
-    match_dist = max(la, lb) // 2 - 1
-    match_dist = max(0, match_dist)
-    a_matches = [False] * la
-    b_matches = [False] * lb
+
+    match_distance = max(max(len_a, len_b) // 2 - 1, 0)
+    a_matches = [False] * len_a
+    b_matches = [False] * len_b
     matches = 0
-    transpositions = 0
-    for i in range(la):
-        lo = max(0, i - match_dist)
-        hi = min(i + match_dist + 1, lb)
+
+    for i, char_a in enumerate(a):
+        lo = max(0, i - match_distance)
+        hi = min(i + match_distance + 1, len_b)
         for j in range(lo, hi):
-            if b_matches[j] or a[i] != b[j]:
+            if b_matches[j] or char_a != b[j]:
                 continue
-            a_matches[i] = b_matches[j] = True
+            a_matches[i] = True
+            b_matches[j] = True
             matches += 1
             break
+
     if matches == 0:
         return 0.0
-    a_seq = [a[i] for i in range(la) if a_matches[i]]
-    b_seq = [b[j] for j in range(lb) if b_matches[j]]
-    for ca, cb in zip(a_seq, b_seq):
-        if ca != cb:
-            transpositions += 1
-    return (matches / la + matches / lb +
-            (matches - transpositions / 2) / matches) / 3
+
+    a_sequence = [a[i] for i in range(len_a) if a_matches[i]]
+    b_sequence = [b[j] for j in range(len_b) if b_matches[j]]
+    transpositions = sum(1 for char_a, char_b in zip(a_sequence, b_sequence) if char_a != char_b)
+
+    return (
+        matches / len_a
+        + matches / len_b
+        + (matches - transpositions / 2) / matches
+    ) / 3
 
 
 def jaro_score(a: str, b: str) -> float:
+    """Return Jaro similarity as a 0-100 score."""
     return round(jaro(a, b) * 100, 1)
 
 
 def jaro_winkler_score(a: str, b: str, p: float = 0.1) -> float:
-    """Jaro-Winkler gives a bonus for shared prefixes (up to 4 chars)."""
-    j = jaro(a, b)
+    """Return Jaro-Winkler similarity as a 0-100 score.
+
+    Jaro-Winkler gives a small bonus for a shared prefix up to four characters.
+    """
+    jaro_value = jaro(a, b)
     prefix = 0
+
     for i in range(min(len(a), len(b), 4)):
-        if a[i] == b[i]:
-            prefix += 1
-        else:
+        if a[i] != b[i]:
             break
-    return round((j + prefix * p * (1 - j)) * 100, 1)
+        prefix += 1
+
+    return round((jaro_value + prefix * p * (1 - jaro_value)) * 100, 1)
 
 
-ALGOS = {
-    "levenshtein":  levenshtein_score,
-    "jaro":         jaro_score,
+ScoreFunction = Callable[[str, str], float]
+
+ALGOS: dict[str, ScoreFunction] = {
+    "levenshtein": levenshtein_score,
+    "jaro": jaro_score,
     "jaro_winkler": jaro_winkler_score,
 }
 
-# ── Highlight matching substrings ─────────────────────────────────────────────
 
-def highlight(candidate: str, query: str) -> str:
-    """Bold any characters in candidate that also appear in query (rough visual aid)."""
-    query_chars = set(query.lower())
-    out = []
-    for ch in candidate:
-        if ch.lower() in query_chars:
-            out.append(f"{BOLD}{CYAN}{ch}{RESET}")
+# ── Presentation helpers ─────────────────────────────────────────────────────
+
+def highlight(candidate: str, query: str, *, color: bool = True) -> str:
+    """Highlight candidate characters that also appear in the query."""
+    c = palette(color)
+    query_chars = set(query.casefold())
+    output = []
+
+    for char in candidate:
+        if char.casefold() in query_chars:
+            output.append(f"{c['bold']}{c['cyan']}{char}{c['reset']}")
         else:
-            out.append(ch)
-    return "".join(out)
+            output.append(char)
+
+    return "".join(output)
 
 
-def score_bar(score: float, width: int = 20) -> str:
+def score_bar(score: float, width: int = 20, *, color: bool = True, unicode: bool = True) -> str:
+    """Render a compact score bar."""
+    c = palette(color)
     filled = int(score / 100 * width)
+    full, empty = ("█", "░") if unicode else ("#", "-")
+
     if score >= 80:
-        color = GREEN
+        bar_color = c["green"]
     elif score >= 50:
-        color = YELLOW
+        bar_color = c["yellow"]
     else:
-        color = RED
-    return f"{color}{'█' * filled}{'░' * (width - filled)}{RESET}"
+        bar_color = c["red"]
+
+    return f"{bar_color}{full * filled}{empty * (width - filled)}{c['reset']}"
+
 
 # ── Input loading ─────────────────────────────────────────────────────────────
 
+def detect_delimiter(lines: Sequence[str], col: int) -> str | None:
+    """Detect tab/comma delimited input, or return None for plain text.
+
+    Column 1 can still be CSV/TSV. This matters for rows such as
+    `id,name,email`, where `--col 1` should return `id`, not the whole line.
+    """
+    sample = "\n".join(lines[:5])
+
+    if "\t" in sample:
+        return "\t"
+
+    if "," in sample:
+        return ","
+
+    if col > 1:
+        # Let users pass `--col 2` for a comma-separated stream even when the
+        # first few lines happen to contain no comma. Rows without the column
+        # are safely skipped below.
+        return ","
+
+    return None
+
+
 def load_words(source: io.TextIOBase, col: int) -> list[str]:
-    """Load words from a file-like object. Auto-detects CSV/TSV vs plain text."""
+    """Load candidate words from plain text, CSV, or TSV input."""
     lines = source.read().splitlines()
     if not lines:
         return []
-    # Detect delimiter
-    sample = "\n".join(lines[:5])
-    if "\t" in sample:
-        delim = "\t"
-    elif "," in sample and col > 1:
-        delim = ","
-    else:
-        # Plain word list — just strip and return
-        if col == 1:
-            return [ln.strip() for ln in lines if ln.strip()]
-        delim = ","
 
-    words = []
-    reader = csv.reader(lines, delimiter=delim)
+    delimiter = detect_delimiter(lines, col)
+    if delimiter is None:
+        return [line.strip() for line in lines if line.strip()]
+
+    words: list[str] = []
+    reader = csv.reader(lines, delimiter=delimiter)
     for row in reader:
-        if len(row) >= col:
-            val = row[col - 1].strip()
-            if val:
-                words.append(val)
+        if len(row) < col:
+            continue
+        value = row[col - 1].strip()
+        if value:
+            words.append(value)
+
     return words
 
-# ── Main ──────────────────────────────────────────────────────────────────────
 
-def parse_args(argv=None):
-    p = argparse.ArgumentParser(
+# ── CLI parsing ───────────────────────────────────────────────────────────────
+
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+
+    return parsed
+
+
+def column_number(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be 1 or greater")
+
+    return parsed
+
+
+def threshold_score(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+
+    if parsed < 0 or parsed > 100:
+        raise argparse.ArgumentTypeError("must be between 0 and 100")
+
+    return parsed
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
         description="Fuzzy string matcher using Levenshtein / Jaro / Jaro-Winkler",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
         add_help=False,
     )
-    p.add_argument("query",              help="Query string to match against")
-    p.add_argument("file", nargs="?",   help="Word list file (default: stdin)")
-    p.add_argument("-n", "--top",        type=int, default=10,           metavar="N")
-    p.add_argument("-t", "--threshold",  type=float, default=0,          metavar="N")
-    p.add_argument("-a", "--algo",       default="levenshtein",
-                   choices=list(ALGOS.keys()),                            metavar="ALGO")
-    p.add_argument("-c", "--col",        type=int, default=1,            metavar="N")
-    p.add_argument("-i", "--ignore-case", action="store_true")
-    p.add_argument("--csv",              action="store_true")
-    p.add_argument("-h", "--help",       action="help")
-    return p.parse_args(argv)
+    parser.add_argument("query", help="Query string to match against")
+    parser.add_argument("file", nargs="?", help="Word list file; default: stdin")
+    parser.add_argument("-n", "--top", type=positive_int, default=10, metavar="N")
+    parser.add_argument("-t", "--threshold", type=threshold_score, default=0.0, metavar="N")
+    parser.add_argument(
+        "-a",
+        "--algo",
+        default="levenshtein",
+        choices=sorted(ALGOS.keys()),
+        metavar="ALGO",
+    )
+    parser.add_argument("-c", "--col", type=column_number, default=1, metavar="N")
+    parser.add_argument("-i", "--ignore-case", action="store_true")
+    parser.add_argument("--csv", action="store_true", help="Output results as CSV")
+    parser.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
+    parser.add_argument("-h", "--help", action="help", help="Show this help")
+    return parser.parse_args(argv)
 
 
-def main(argv=None):
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def read_candidates(args: argparse.Namespace) -> list[str]:
+    if args.file:
+        with open(args.file, encoding="utf-8", errors="replace") as file:
+            return load_words(file, args.col)
+
+    if sys.stdin.isatty():
+        raise RuntimeError(
+            "no file given and stdin is a terminal. "
+            "Pipe a word list or pass a filename. Run with -h for help."
+        )
+
+    return load_words(sys.stdin, args.col)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    stdout_color = sys.stdout.isatty() and not args.no_color and not args.csv
+    stdout_unicode = supports_pretty_glyphs(sys.stdout)
+    stderr_color = sys.stderr.isatty() and not args.no_color
+    out = palette(stdout_color)
+    err = palette(stderr_color)
 
-    # Load word list
     try:
-        if args.file:
-            with open(args.file, encoding="utf-8", errors="replace") as f:
-                words = load_words(f, args.col)
-        else:
-            if sys.stdin.isatty():
-                print(f"{RED}Error:{RESET} no file given and stdin is a terminal.\n"
-                      "       Pipe a word list or pass a filename.\n"
-                      "       Run with -h for help.", file=sys.stderr)
-                sys.exit(1)
-            words = load_words(sys.stdin, args.col)
+        words = read_candidates(args)
     except FileNotFoundError:
-        print(f"{RED}Error:{RESET} file not found: {args.file}", file=sys.stderr)
-        sys.exit(1)
+        print(f"{err['red']}Error:{err['reset']} file not found: {args.file}", file=sys.stderr)
+        return 1
+    except RuntimeError as exc:
+        print(f"{err['red']}Error:{err['reset']} {exc}", file=sys.stderr)
+        return 1
 
     if not words:
-        print(f"{YELLOW}Warning:{RESET} word list is empty.", file=sys.stderr)
-        sys.exit(0)
+        print(f"{err['yellow']}Warning:{err['reset']} word list is empty.", file=sys.stderr)
+        return 0
 
     query = args.query
     score_fn = ALGOS[args.algo]
 
     if args.ignore_case:
-        q = query.lower()
-        scored = [(w, score_fn(q, w.lower())) for w in words]
+        normalized_query = query.casefold()
+        scored = [(word, score_fn(normalized_query, word.casefold())) for word in words]
     else:
-        scored = [(w, score_fn(query, w)) for w in words]
+        scored = [(word, score_fn(query, word)) for word in words]
 
-    # Filter, sort, trim
-    scored = [(w, s) for w, s in scored if s >= args.threshold]
-    scored.sort(key=lambda x: x[1], reverse=True)
-    results = scored[: args.top]
+    results = [(word, score) for word, score in scored if score >= args.threshold]
+    results.sort(key=lambda item: item[1], reverse=True)
+    results = results[: args.top]
 
     if not results:
-        print(f"{YELLOW}No matches above threshold {args.threshold}.{RESET}")
-        return
+        print(f"{out['yellow']}No matches above threshold {args.threshold}.{out['reset']}")
+        return 0
 
-    # ── CSV output ────────────────────────────────────────────────────────────
     if args.csv:
         writer = csv.writer(sys.stdout)
         writer.writerow(["rank", "score", "match"])
         for rank, (word, score) in enumerate(results, 1):
-            writer.writerow([rank, score, word])
-        return
+            writer.writerow([rank, f"{score:.1f}", word])
+        return 0
 
-    # ── Pretty terminal output ────────────────────────────────────────────────
     algo_label = args.algo.replace("_", "-")
-    print(f"\n  {BOLD}fuzzy match{RESET}  "
-          f"query={CYAN}{query}{RESET}  "
-          f"algo={DIM}{algo_label}{RESET}  "
-          f"words={DIM}{len(words):,}{RESET}  "
-          f"showing={DIM}{len(results)}{RESET}\n")
+    print(
+        f"\n  {out['bold']}fuzzy match{out['reset']}  "
+        f"query={out['cyan']}{query}{out['reset']}  "
+        f"algo={out['dim']}{algo_label}{out['reset']}  "
+        f"words={out['dim']}{len(words):,}{out['reset']}  "
+        f"showing={out['dim']}{len(results)}{out['reset']}\n"
+    )
 
-    rank_w  = len(str(len(results)))
-    score_w = 6
-    bar_w   = 20
-    max_word_len = max(len(w) for w, _ in results)
-    col_w   = max(max_word_len, 6)
+    rank_width = len(str(len(results)))
+    score_width = 6
+    bar_width = 20
+    max_word_length = max(len(word) for word, _ in results)
+    column_width = max(max_word_length, 6)
 
-    header = (f"  {'#':>{rank_w}}  {'score':>{score_w}}  "
-              f"{'bar':<{bar_w + 10}}  {'match'}")
-    print(f"{DIM}{header}{RESET}")
-    print(f"  {'─' * rank_w}  {'─' * score_w}  {'─' * bar_w}  {'─' * col_w}")
+    header = f"  {'#':>{rank_width}}  {'score':>{score_width}}  {'bar':<{bar_width + 10}}  match"
+    print(f"{out['dim']}{header}{out['reset']}")
+    separator = "─" if stdout_unicode else "-"
+    print(f"  {separator * rank_width}  {separator * score_width}  {separator * bar_width}  {separator * column_width}")
 
     for rank, (word, score) in enumerate(results, 1):
-        bar     = score_bar(score, bar_w)
-        hl      = highlight(word, query)
-        rank_s  = f"{rank:>{rank_w}}"
-        score_s = f"{score:>{score_w}.1f}"
-        # rank colour
+        bar = score_bar(score, bar_width, color=stdout_color, unicode=stdout_unicode)
+        highlighted = highlight(word, query, color=stdout_color)
+        rank_text = f"{rank:>{rank_width}}"
+        score_text = f"{score:>{score_width}.1f}"
+
         if rank == 1:
-            rank_s = f"{BOLD}{GREEN}{rank_s}{RESET}"
+            rank_text = f"{out['bold']}{out['green']}{rank_text}{out['reset']}"
         elif rank <= 3:
-            rank_s = f"{YELLOW}{rank_s}{RESET}"
-        print(f"  {rank_s}  {score_s}  {bar}  {hl}")
+            rank_text = f"{out['yellow']}{rank_text}{out['reset']}"
+
+        print(f"  {rank_text}  {score_text}  {bar}  {highlighted}")
 
     print()
     best_word, best_score = results[0]
-    print(f"  {BOLD}Best match:{RESET} {CYAN}{best_word}{RESET} "
-          f"({GREEN}{best_score}{RESET}/100)\n")
+    print(
+        f"  {out['bold']}Best match:{out['reset']} {out['cyan']}{best_word}{out['reset']} "
+        f"({out['green']}{best_score:.1f}{out['reset']}/100)\n"
+    )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

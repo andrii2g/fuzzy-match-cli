@@ -1,56 +1,78 @@
-# Fuzzy Match CLI
+# fuzzy
 
-A small zero-dependency Python command-line tool for finding the closest matching strings in a word list.
+`fuzzy-match-cli` is a Python CLI tool for finding fuzzy string matches in a word list, CSV file, TSV file, or piped input.
 
-It supports three fuzzy matching algorithms:
+It supports three algorithms:
 
-- **Levenshtein** similarity for typo-tolerant matching
-- **Jaro** similarity for short strings and names
-- **Jaro-Winkler** similarity for names and strings where the beginning is important
+- Levenshtein similarity
+- Jaro similarity
+- Jaro-Winkler similarity
 
-The tool can read candidates from a file or from standard input, supports plain text, CSV, and TSV input, and can print either a readable terminal table or CSV output for scripts.
+The tool is useful for quick local lookups, typo-tolerant search experiments, cleaning CSV data, matching names, and building small developer automation scripts.
 
 ## Features
 
 - Reads from a file or `stdin`
-- Supports plain word lists, CSV, and TSV input
-- Selects a specific CSV/TSV column with `--col`
+- Supports plain text, CSV, and TSV input
+- Can select a specific CSV/TSV column
 - Supports case-insensitive matching
-- Supports score thresholds from `0` to `100`
-- Supports machine-readable CSV output
-- Pretty terminal output with score bars and highlighted characters
+- Supports pretty terminal output or machine-readable CSV output
+- Includes pytest-based test coverage
 
+## Requirements
 
-## Installation
+- Python 3.10+
 
-### Option 1: Run as a standalone script
+Runtime dependencies: none.
 
-Clone the repository and run the script directly:
+Development/test dependency:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
+```
+
+On Debian/Ubuntu systems with Python 3.12+, installing with plain
+`pip install -r requirements-dev.txt` may fail with
+`externally-managed-environment`. That is expected for system-managed Python
+installations. Use a virtual environment as shown above instead of passing
+`--break-system-packages`.
+
+If creating the virtual environment fails, install the standard Python venv
+support first:
+
+```bash
+sudo apt update
+sudo apt install python3-full
+```
+
+## Quick start
+
+Clone the repository:
 
 ```bash
 git clone https://github.com/andrii2g/fuzzy-match-cli.git
 cd fuzzy-match-cli
-python3 fuzzy.py "pytohn" words.txt
 ```
 
-You can also make it executable:
+Run directly:
+
+```bash
+python fuzzy.py "pytohn" words.txt
+```
+
+![Demo screenshot](assets/demo.png)
+
+The repository includes `words.txt`, `names.csv`, and `names.tsv` sample files
+so the quick-start commands work immediately after cloning.
+
+Or make it executable on Linux/macOS:
 
 ```bash
 chmod +x fuzzy.py
 ./fuzzy.py "pytohn" words.txt
-```
-
-### Option 2: Put it somewhere on your PATH
-
-```bash
-sudo cp fuzzy.py /usr/local/bin/fuzzy
-sudo chmod +x /usr/local/bin/fuzzy
-```
-
-Then run:
-
-```bash
-fuzzy "pytohn" words.txt
 ```
 
 ## Usage
@@ -59,70 +81,63 @@ fuzzy "pytohn" words.txt
 fuzzy.py <query> [options] [wordlist_file]
 ```
 
-If no file is provided, the tool reads candidates from standard input.
+If no file is provided, the tool reads candidates from `stdin`.
 
-```text
-Options:
-  -n, --top N          Show top N matches. Default: 10
-  -t, --threshold N    Only show matches with score >= N. Range: 0-100. Default: 0
-  -a, --algo ALGO      Algorithm: levenshtein, jaro, or jaro_winkler. Default: levenshtein
-  -c, --col N          Use column N, 1-based, for CSV/TSV input. Default: 1
-  -i, --ignore-case    Match case-insensitively
-  --csv                Output results as CSV
-  -h, --help           Show help
-```
+### Options
+
+| Option | Description |
+|---|---|
+| `-n, --top N` | Show top N matches. Default: `10`. Must be greater than `0`. |
+| `-t, --threshold N` | Only show matches with score >= N. Range: `0..100`. Default: `0`. |
+| `-a, --algo ALGO` | Algorithm: `levenshtein`, `jaro`, or `jaro_winkler`. Default: `levenshtein`. |
+| `-c, --col N` | Use column N for CSV/TSV input. 1-based. Default: `1`. |
+| `-i, --ignore-case` | Use case-insensitive matching. Uses Unicode-aware `casefold()`. |
+| `--csv` | Output results as CSV. |
+| `--no-color` | Disable ANSI colors in terminal output. |
+| `-h, --help` | Show help. |
 
 ## Examples
 
-### Match a typo against a word list
+Search a plain word list:
 
 ```bash
-./fuzzy.py "pytohn" words.txt
+python fuzzy.py "pytohn" words.txt
 ```
 
-### Show only the top 5 matches
+Show only the top 5 results using Jaro-Winkler:
 
 ```bash
-./fuzzy.py "pytohn" words.txt --top 5
+python fuzzy.py "pytohn" words.txt -n 5 -a jaro_winkler
 ```
 
-### Use Jaro-Winkler for name-like matching
+Read from `stdin`:
 
 ```bash
-./fuzzy.py "Jon Smith" names.txt --algo jaro_winkler
+cat words.txt | python fuzzy.py "ngnix"
 ```
 
-### Ignore case
+Search the second column of a CSV file:
 
 ```bash
-./fuzzy.py "nginx" /etc/hosts --ignore-case
+python fuzzy.py "Jon Smith" names.csv -c 2 --threshold 70
 ```
 
-### Read candidates from stdin
+Generate machine-readable CSV output:
 
 ```bash
-cat words.txt | ./fuzzy.py "helo wrold"
+python fuzzy.py "pytohn" words.txt --csv
 ```
 
-### Match against the second column in a CSV file
+Case-insensitive matching:
 
 ```bash
-cat names.csv | ./fuzzy.py "Jon Smith" --col 2 --threshold 70
+python fuzzy.py "straße" words.txt -i
 ```
 
-### Produce CSV output
+Disable colors:
 
 ```bash
-./fuzzy.py "pytohn" words.txt --csv
-```
-
-Example output:
-
-```csv
-rank,score,match
-1,83.3,python
-2,66.7,pylon
-3,50.0,typhoon
+python fuzzy.py "pytohn" words.txt --no-color
 ```
 
 ## Input formats
@@ -133,9 +148,8 @@ One candidate per line:
 
 ```text
 python
-pytorch
 pytest
-pylint
+pyright
 ```
 
 ### CSV
@@ -143,137 +157,131 @@ pylint
 ```csv
 id,name
 1,John Smith
-2,Jane Smith
-3,Jon Smyth
+2,Jane Doe
 ```
 
-To match against the second column:
+Search column 2:
 
 ```bash
-./fuzzy.py "Jon Smith" names.csv --col 2
+python fuzzy.py "Jon Smith" names.csv -c 2
 ```
 
 ### TSV
 
 ```text
+id	name
 1	John Smith
-2	Jane Smith
-3	Jon Smyth
+2	Jane Doe
 ```
 
-The tool auto-detects tab-separated input when tabs are present.
+Search column 2:
 
-## Algorithm guide
+```bash
+python fuzzy.py "Jon Smith" names.tsv -c 2
+```
+
+## Algorithms
 
 ### Levenshtein
 
-Best default choice for typo correction and general string distance.
+Levenshtein distance counts how many single-character edits are needed to transform one string into another. The tool normalizes this into a `0..100` similarity score.
 
-Example use cases:
+Best for:
 
-- Misspelled words
-- Command names
-- File names
-- Configuration keys
+- typo correction
+- short command names
+- file names
+- identifiers
 
 ### Jaro
 
-Good for short strings where character transpositions matter less than exact edit distance.
+Jaro similarity gives higher scores when matching characters appear in roughly the same order and position.
 
-Example use cases:
+Best for:
 
-- Short labels
-- Names
-- Codes
+- names
+- short labels
+- strings with transpositions
 
 ### Jaro-Winkler
 
-Good for names and identifiers where a shared prefix should increase the score.
+Jaro-Winkler is based on Jaro and adds a prefix bonus for strings that start similarly.
 
-Example use cases:
+Best for:
 
-- Person names
-- Company names
-- Product names
-- Hostnames with common prefixes
+- person names
+- product names
+- lookup lists where prefixes matter
 
-## Exit behavior
+## Running tests
 
-- If the input file does not exist, the tool prints an error and exits with code `1`.
-- If no file is provided and stdin is interactive, the tool prints an error and exits with code `1`.
-- If the word list is empty, the tool prints a warning and exits successfully.
-- If no matches pass the threshold, the tool prints a message and exits successfully.
-
-## Performance notes
-
-The tool is intentionally simple and dependency-free.
-
-Current behavior:
-
-- It loads the full input into memory.
-- It scores every candidate.
-- It sorts all scored candidates and returns the top results.
-
-This is perfectly fine for small and medium word lists. For very large files, a future version could use streaming input plus `heapq.nlargest()` to keep only the best `N` matches in memory.
-
-## Suggested repository structure
-
-```text
-fuzzy-match-cli/
-├── fuzzy.py
-├── README.md
-├── LICENSE
-├── CHANGELOG.md
-├── .gitignore
-├── pyproject.toml
-├── tests/
-│   ├── test_algorithms.py
-│   └── test_cli.py
-└── .github/
-    └── workflows/
-        └── ci.yml
-```
-
-## Development
-
-Run the script locally:
+Create and activate a virtual environment, then install test dependencies:
 
 ```bash
-python3 fuzzy.py "pytohn" words.txt
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
 ```
 
 Run tests:
 
 ```bash
-python3 -m pytest
+python -m pytest
 ```
 
-Format and lint the code if development tools are configured:
+The tests include example-level checks that run the sample commands against
+`words.txt`, `names.csv`, and `names.tsv`. This catches broken documentation
+examples such as missing input files.
+
+Run with verbose output:
 
 ```bash
-python3 -m ruff check .
-python3 -m ruff format .
+python -m pytest -v
 ```
 
-## Recommended improvements before publishing
+## Repository structure
 
-The current script is already useful, but a few small hardening changes would make it better for a public repository:
+```text
+.
+├── fuzzy.py
+├── README.md
+├── assets
+│   └── demo.png
+├── words.txt
+├── names.csv
+├── names.tsv
+├── requirements-dev.txt
+├── pyproject.toml
+├── .gitignore
+└── tests
+    ├── test_algorithms.py
+    ├── test_cli.py
+    ├── test_examples.py
+    └── test_input_loading.py
+```
 
-1. Validate CLI arguments:
-   - `--top` should be greater than `0`
-   - `--threshold` should be between `0` and `100`
-   - `--col` should be greater than or equal to `1`
+## Design notes
 
-2. Improve CSV detection:
-   - Currently comma-separated input is parsed as CSV only when `--col` is greater than `1`.
-   - For CSV files where the desired column is `1`, the current implementation may treat the whole line as plain text.
+The first version is intentionally simple:
 
-3. Use `casefold()` instead of `lower()` for better Unicode-aware case-insensitive matching.
+- no server
+- no database
+- no external fuzzy matching library
+- no package publishing workflow
+- no configuration file
 
-4. Disable ANSI colors automatically when stdout is not a terminal, or support a `--no-color` option.
+This keeps the repository easy to read, test, and extend.
 
-5. Add automated tests for algorithms, input loading, CLI validation, and CSV output.
+## Possible future improvements
+
+- Add `--json` output
+- Add `--limit-length` for very large input files
+- Add optional rapid matching backend using `rapidfuzz`
+- Add `--include-header` / `--skip-header` for CSV workflows
+- Add GitHub Actions CI
+- Publish as a package with a console script
 
 ## License
 
-MIT License.
+MIT License. See [LICENSE](LICENSE).

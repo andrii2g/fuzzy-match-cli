@@ -1,0 +1,10 @@
+python
+pytest
+pyright
+pylint
+pytorch
+typhoon
+nginx
+docker
+kubernetes
+javascript
